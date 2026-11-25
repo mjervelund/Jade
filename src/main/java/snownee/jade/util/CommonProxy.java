@@ -70,6 +70,7 @@ import net.minecraft.world.level.storage.loot.predicates.MatchTool;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.neoforge.gametest.GameTestHooks;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.ModList;
 import net.neoforged.fml.common.Mod;
@@ -122,6 +123,7 @@ import snownee.jade.mixin.AbstractHorseAccess;
 import snownee.jade.mixin.forge.CanItemPerformAbilityAccess;
 import snownee.jade.network.ClientHandshakePacket;
 import snownee.jade.network.ReceiveDataPacket;
+import snownee.jade.test.JadeGameTests;
 import snownee.jade.network.RequestBlockPacket;
 import snownee.jade.network.RequestEntityPacket;
 import snownee.jade.network.ServerHandshakePacket;
@@ -604,6 +606,9 @@ public final class CommonProxy {
 	}
 
 	public CommonProxy(IEventBus modBus) {
+		if (isDevEnv() && GameTestHooks.isGametestEnabled()) {
+			JadeGameTests.register(modBus);
+		}
 		modBus.addListener(FMLLoadCompleteEvent.class, event -> event.enqueueWork(CommonProxy::loadComplete));
 		modBus.addListener(
 				RegisterPayloadHandlersEvent.class, event -> {

@@ -1,6 +1,8 @@
 package snownee.jade.addon.universal;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -16,6 +18,7 @@ import com.google.common.collect.Lists;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
@@ -57,6 +60,7 @@ import snownee.jade.api.view.ViewGroup;
 import snownee.jade.impl.WailaClientRegistration;
 import snownee.jade.impl.WailaCommonRegistration;
 import snownee.jade.impl.ui.HorizontalLineElement;
+import snownee.jade.network.ReceiveDataPacket;
 import snownee.jade.util.ClientProxy;
 import snownee.jade.util.CommonProxy;
 import snownee.jade.util.WailaExceptionHandler;
@@ -71,7 +75,12 @@ public class ItemStorageProvider<T extends Accessor<?>> implements IServerDataPr
 			.weakKeys()
 			.expireAfterAccess(Duration.ofMinutes(2))
 			.build();
-	private static final StreamCodec<RegistryFriendlyByteBuf, Map.Entry<Identifier, List<ViewGroup<ItemStack>>>> STREAM_CODEC = ViewGroup.listCodec(
+	/**
+	 * Budget for the encoded item list: three quarters of {@link ReceiveDataPacket#MAX_SIZE}, leaving room for the other
+	 * providers' data in the same packet.
+	 */
+	public static final int MAX_ENCODED_SIZE = ReceiveDataPacket.MAX_SIZE * 3 / 4;
+	public static final StreamCodec<RegistryFriendlyByteBuf, Map.Entry<Identifier, List<ViewGroup<ItemStack>>>> STREAM_CODEC = ViewGroup.listCodec(
 			ItemStack.OPTIONAL_STREAM_CODEC.map(
 					stack -> {
 						if (stack.count() < 99 || !stack.has(DataComponents.CUSTOM_DATA)) {
@@ -229,6 +238,41 @@ public class ItemStorageProvider<T extends Accessor<?>> implements IServerDataPr
 		}
 	}
 
+	/**
+	 * Encodes the item list. If it is larger than {@link #MAX_ENCODED_SIZE}, the data components of the largest stacks are
+	 * stripped (they still show as their plain item) until it fits. Otherwise {@link ReceiveDataPacket#send} would drop
+	 * the whole list because of one written book or filled shulker box in the container.
+	 */
+	private static Tag encodeWithinLimit(Accessor<?> accessor, Map.Entry<Identifier, List<ViewGroup<ItemStack>>> entry) {
+		Tag encoded = accessor.encodeAsNbt(STREAM_CODEC, entry);
+		int size = encoded.sizeInBytes();
+		if (size <= MAX_ENCODED_SIZE) {
+			return encoded;
+		}
+		record StackSlot(List<ItemStack> views, int index, int size) {}
+		List<StackSlot> slots = new ArrayList<>();
+		for (ViewGroup<ItemStack> group : entry.getValue()) {
+			group.views = new ArrayList<>(group.views);
+			for (int i = 0; i < group.views.size(); i++) {
+				ItemStack stack = group.views.get(i);
+				if (!stack.isComponentsPatchEmpty()) {
+					slots.add(new StackSlot(group.views, i, accessor.encodeAsNbt(ItemStack.OPTIONAL_STREAM_CODEC, stack).sizeInBytes()));
+				}
+			}
+		}
+		slots.sort(Comparator.comparingInt(StackSlot::size).reversed());
+		for (StackSlot slot : slots) {
+			ItemStack stack = slot.views().get(slot.index());
+			ItemStack stripped = new ItemStack(stack.getItem(), stack.getCount());
+			slot.views().set(slot.index(), stripped);
+			size -= slot.size() - accessor.encodeAsNbt(ItemStack.OPTIONAL_STREAM_CODEC, stripped).sizeInBytes();
+			if (size <= MAX_ENCODED_SIZE) {
+				break;
+			}
+		}
+		return accessor.encodeAsNbt(STREAM_CODEC, entry);
+	}
+
 	public static void putData(Accessor<?> accessor) {
 		CompoundTag tag = accessor.getServerData();
 		Object target = accessor.getTarget();
@@ -243,7 +287,7 @@ public class ItemStorageProvider<T extends Accessor<?>> implements IServerDataPr
 					group.views = group.views.subList(0, ItemCollector.MAX_SIZE);
 				}
 			}
-			tag.put(JadeIds.UNIVERSAL_ITEM_STORAGE.toString(), accessor.encodeAsNbt(STREAM_CODEC, entry));
+			tag.put(JadeIds.UNIVERSAL_ITEM_STORAGE.toString(), encodeWithinLimit(accessor, entry));
 			return;
 		}
 		if (target instanceof RandomizableContainer containerEntity && containerEntity.getLootTable() != null) {
